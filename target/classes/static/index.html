@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NBA AI Predictor</title>
+    <meta
+      name="description"
+      content="A frontend console for exploring NBA player statistics from the predictor API."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260712-predictions" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="NBA AI Predictor home">
+          <span class="brand-mark" aria-hidden="true">NBA</span>
+          <span>
+            <strong>NBA AI Predictor</strong>
+            <small>Player intelligence desk</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span class="api-pill" id="apiStatus">Connecting</span>
+          <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh players">
+            <span aria-hidden="true">↻</span>
+          </button>
+          <button class="primary-button" id="addPlayerButton" type="button">
+            <span aria-hidden="true">+</span>
+            Add player
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero-panel">
+          <div class="hero-copy">
+            <p class="eyebrow">2024-25 regular season dataset</p>
+            <h1>Find high-impact players faster.</h1>
+            <p>
+              Search the live backend roster, compare production profiles, and keep player records tidy from one focused interface.
+            </p>
+          </div>
+          <div class="court-visual" aria-hidden="true">
+            <div class="court-line court-arc"></div>
+            <div class="court-line court-key"></div>
+            <div class="court-line court-rim"></div>
+            <div class="court-dot dot-one"></div>
+            <div class="court-dot dot-two"></div>
+            <div class="court-dot dot-three"></div>
+            <div class="court-stat">
+              <strong id="heroTopPoints">--</strong>
+              <span>top PPG</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="metrics-grid" aria-label="Dataset summary">
+          <article class="metric-card">
+            <span>Total players</span>
+            <strong id="totalPlayers">--</strong>
+          </article>
+          <article class="metric-card">
+            <span>Teams</span>
+            <strong id="totalTeams">--</strong>
+          </article>
+          <article class="metric-card">
+            <span>Average PPG</span>
+            <strong id="averagePoints">--</strong>
+          </article>
+          <article class="metric-card accent">
+            <span>Impact leader</span>
+            <strong id="impactLeader">--</strong>
+          </article>
+        </section>
+
+        <section class="workspace-grid">
+          <aside class="filter-rail" aria-label="Filters and leaders">
+            <div class="panel-heading">
+              <h2>Filters</h2>
+              <button class="ghost-button" id="clearFiltersButton" type="button">Clear</button>
+            </div>
+
+            <label class="field-label" for="nameFilter">Player</label>
+            <input id="nameFilter" type="search" placeholder="Search by name" autocomplete="off" />
+
+            <label class="field-label" for="teamFilter">Team</label>
+            <select id="teamFilter">
+              <option value="">All teams</option>
+            </select>
+
+            <label class="field-label" for="positionFilter">Position</label>
+            <select id="positionFilter">
+              <option value="">All positions</option>
+            </select>
+
+            <label class="field-label" for="minimumGames">Minimum games</label>
+            <input id="minimumGames" type="range" min="0" max="82" value="0" />
+            <div class="range-row">
+              <span>0</span>
+              <strong id="minimumGamesValue">0</strong>
+              <span>82</span>
+            </div>
+
+            <div class="leader-block">
+              <div class="panel-heading compact">
+                <h2>Leaders</h2>
+              </div>
+              <div id="leadersList" class="leaders-list"></div>
+            </div>
+          </aside>
+
+          <section class="table-panel" aria-label="Player table">
+            <div class="table-toolbar">
+              <div>
+                <p class="eyebrow">Roster table</p>
+                <h2><span id="visibleCount">0</span> matching players</h2>
+              </div>
+              <label class="compact-search" for="quickSearch">
+                <span>Quick search</span>
+                <input id="quickSearch" type="search" placeholder="Name, team, position" autocomplete="off" />
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th><button data-sort="name" type="button">Player</button></th>
+                    <th><button data-sort="team" type="button">Team</button></th>
+                    <th><button data-sort="position" type="button">Pos</button></th>
+                    <th><button data-sort="points" type="button">PTS</button></th>
+                    <th><button data-sort="totalRebounds" type="button">REB</button></th>
+                    <th><button data-sort="assists" type="button">AST</button></th>
+                    <th><button data-sort="fieldGoalPct" type="button">FG%</button></th>
+                    <th><button data-sort="threePointerPct" type="button">3P%</button></th>
+                    <th><button data-sort="games" type="button">G</button></th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="playersTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="analysis-grid">
+          <article class="detail-panel" id="playerDetailPanel" aria-live="polite">
+            <div class="empty-state">
+              <span class="empty-mark" aria-hidden="true">⌁</span>
+              <h2>Select a player</h2>
+              <p>Player profile, scoring mix, and impact index appear here.</p>
+            </div>
+          </article>
+
+          <article class="compare-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Head to head</p>
+                <h2>Compare players</h2>
+              </div>
+            </div>
+            <div class="compare-selectors">
+              <select id="compareA" aria-label="First comparison player"></select>
+              <select id="compareB" aria-label="Second comparison player"></select>
+            </div>
+            <div id="compareOutput" class="compare-output"></div>
+          </article>
+        </section>
+
+        <section class="prediction-grid" aria-label="Next season predictions">
+          <article class="forecast-panel" id="predictionPanel" aria-live="polite">
+            <div class="empty-state compact-empty">
+              <span class="empty-mark" aria-hidden="true">↗</span>
+              <h2>Select a player</h2>
+              <p>Next-season projections appear here once the model is ready.</p>
+            </div>
+          </article>
+
+          <article class="projection-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Model board</p>
+                <h2>Top projected scorers</h2>
+              </div>
+              <button class="ghost-button" id="retrainModelButton" type="button">Retrain</button>
+            </div>
+            <p class="model-status" id="modelStatus">Training model</p>
+            <div id="topPredictionsList" class="top-predictions-list"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="playerDialog" class="player-dialog">
+      <form id="playerForm" method="dialog">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow" id="dialogEyebrow">Player record</p>
+            <h2 id="dialogTitle">Add player</h2>
+          </div>
+          <button class="icon-button" value="cancel" formnovalidate aria-label="Close dialog">
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+        <div id="formFields" class="form-grid"></div>
+        <div class="dialog-actions">
+          <button class="ghost-button" value="cancel" type="button" id="cancelDialogButton">Cancel</button>
+          <button class="primary-button" value="default" type="submit" id="savePlayerButton">Save player</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="/app.js?v=20260712-predictions" defer></script>
+  </body>
+</html>

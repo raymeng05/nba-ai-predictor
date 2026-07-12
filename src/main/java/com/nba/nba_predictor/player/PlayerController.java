@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 // every method returns a domain object instead of a view
 
-@RequestMapping(path = "api/player")
+@RequestMapping(path = "api/player") 
 public class PlayerController {
 
     private final PlayerService playerService;
