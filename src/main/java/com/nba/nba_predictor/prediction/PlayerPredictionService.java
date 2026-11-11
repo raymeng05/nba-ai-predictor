@@ -38,6 +38,23 @@ public class PlayerPredictionService {
             "freeThrowPct",
             "effectiveFieldGoalPct");
 
+    private static final List<String> FEATURE_NAMES = List.of(
+            "next_age_scaled",
+            "next_age_squared_scaled",
+            "games_rate",
+            "minutes_rate",
+            "points_rate",
+            "rebounds_rate",
+            "assists_rate",
+            "steals_rate",
+            "blocks_rate",
+            "turnovers_rate",
+            "field_goal_pct",
+            "three_pointer_pct",
+            "free_throw_pct",
+            "effective_field_goal_pct",
+            "team_scoring_index");
+
     private final ObjectMapper objectMapper;
     private final PlayerService playerService;
     private volatile PythonPredictionModel model;
@@ -48,8 +65,7 @@ public class PlayerPredictionService {
     }
 
     public ModelSummary trainModel() {
-        List<Player> players = playerService.getPlayers();
-        this.model = trainWithPython(players);
+        this.model = trainWithPython();
         return this.model.summary();
     }
 
@@ -80,7 +96,7 @@ public class PlayerPredictionService {
             synchronized (this) {
                 currentModel = this.model;
                 if (currentModel == null) {
-                    currentModel = trainWithPython(playerService.getPlayers());
+                    currentModel = trainWithPython();
                     this.model = currentModel;
                 }
             }
@@ -88,15 +104,18 @@ public class PlayerPredictionService {
         return currentModel;
     }
 
-    private PythonPredictionModel trainWithPython(List<Player> players) {
+    private PythonPredictionModel trainWithPython() {
         try {
             Path workingDirectory = Files.createTempDirectory("nba-predictor-ml-");
-            Path playersJson = workingDirectory.resolve("players.json");
+            Path historicalCsv = copyHistoricalData(workingDirectory);
             Path modelJson = workingDirectory.resolve("prediction-model.json");
             Path trainerScript = copyTrainerScript(workingDirectory);
 
-            objectMapper.writeValue(playersJson.toFile(), players);
-            Process process = new ProcessBuilder(pythonCommand(), trainerScript.toString(), playersJson.toString(), modelJson.toString())
+            Process process = new ProcessBuilder(
+                    pythonCommand(),
+                    trainerScript.toString(),
+                    historicalCsv.toString(),
+                    modelJson.toString())
                     .directory(workingDirectory.toFile())
                     .redirectErrorStream(true)
                     .start();
@@ -129,6 +148,16 @@ public class PlayerPredictionService {
             input.transferTo(output);
         }
         return trainerScript;
+    }
+
+    private Path copyHistoricalData(Path workingDirectory) throws IOException {
+        Path historicalCsv = workingDirectory.resolve("historical_player_seasons.csv");
+        ClassPathResource resource = new ClassPathResource("ml/historical_player_seasons.csv");
+        try (InputStream input = resource.getInputStream();
+             OutputStream output = Files.newOutputStream(historicalCsv)) {
+            input.transferTo(output);
+        }
+        return historicalCsv;
     }
 
     private String pythonCommand() {
@@ -166,16 +195,9 @@ public class PlayerPredictionService {
 
     private PlayerPrediction predict(Player player, PythonPredictionModel trainedModel) {
         PredictionStats current = toStats(player);
-        PredictionStats positionAverage = trainedModel.positionAverages()
-                .getOrDefault(safePosition(player), trainedModel.leagueAverage());
         double teamIndex = trainedModel.teamScoringIndexes().getOrDefault(safeTeam(player), 1.0);
-        double ageCurve = ageCurve(player.getAge() + 1);
-        double roleStability = roleStability(player);
-
         PredictionStats modelStats = predictWithPythonModel(player, trainedModel, teamIndex);
-        PredictionStats agedStats = applyAgeAndRole(player, current, ageCurve, teamIndex, roleStability);
-        PredictionStats predicted = blendStats(agedStats, modelStats, positionAverage);
-        PredictionStats bounded = boundPrediction(predicted, player);
+        PredictionStats bounded = boundPrediction(modelStats, player);
         PredictionStats delta = subtract(bounded, current);
 
         double confidence = confidence(player, trainedModel.summary().trainingSamples(), trainedModel.validationR2());
@@ -191,16 +213,16 @@ public class PlayerPredictionService {
                 bounded,
                 delta,
                 List.of(
-                        "Python pandas feature engineering",
-                        "scikit-learn StandardScaler + Ridge regression",
-                        "Age curve for age " + (player.getAge() + 1),
+                        "Ten NBA regular seasons",
+                        "Nine next-season transitions",
+                        "Age and prior-season production",
                         "Team scoring environment",
-                        "Position baseline shrinkage"),
-                "Training now runs in Python using pandas, numpy, and scikit-learn. Spring loads the trained artifact for fast API inference.");
+                        "Chronological 2024-25 backtest"),
+                "The Ridge model is trained on real season-to-season player outcomes. Spring loads the tested Python artifact for fast API inference.");
     }
 
     private PredictionStats predictWithPythonModel(Player player, PythonPredictionModel trainedModel, double teamIndex) {
-        double[] features = buildFeatures(player, true, teamIndex);
+        double[] features = buildFeatures(player, teamIndex);
         double[] scaledFeatures = new double[features.length];
         for (int i = 0; i < features.length; i++) {
             double scale = trainedModel.scalerScale()[i] == 0 ? 1.0 : trainedModel.scalerScale()[i];
@@ -230,48 +252,6 @@ public class PlayerPredictionService {
                 predictions[9],
                 predictions[10],
                 predictions[11]);
-    }
-
-    private PredictionStats applyAgeAndRole(Player player, PredictionStats current, double ageCurve, double teamIndex, double roleStability) {
-        double roleFactor = 0.94 + (roleStability * 0.12);
-        double usageFactor = ageCurve * roleFactor * (0.97 + (teamIndex * 0.03));
-        double defenseFactor = clamp(ageCurve + 0.02, 0.86, 1.08);
-        double efficiencyFactor = 1.0 + ((ageCurve - 1.0) * 0.28);
-
-        return new PredictionStats(
-                current.games() * clamp(0.93 + roleStability * 0.10 + availabilityAgeAdjustment(player.getAge()), 0.72, 1.04),
-                current.minutesPlayed() * clamp(0.91 + roleStability * 0.12 + availabilityAgeAdjustment(player.getAge()), 0.70, 1.05),
-                current.points() * usageFactor,
-                current.totalRebounds() * clamp(usageFactor + 0.01, 0.78, 1.10),
-                current.assists() * clamp(usageFactor + guardCreationBonus(player), 0.78, 1.12),
-                current.steals() * defenseFactor,
-                current.blocks() * defenseFactor,
-                current.turnovers() * clamp(usageFactor, 0.76, 1.12),
-                current.fieldGoalPct() * efficiencyFactor,
-                current.threePointerPct() * (1.0 + ((ageCurve - 1.0) * 0.18)),
-                current.freeThrowPct() * (1.0 + ((ageCurve - 1.0) * 0.08)),
-                current.effectiveFieldGoalPct() * efficiencyFactor);
-    }
-
-    private PredictionStats blendStats(PredictionStats agedStats, PredictionStats modelStats, PredictionStats positionAverage) {
-        return new PredictionStats(
-                blend(agedStats.games(), modelStats.games(), positionAverage.games(), 0.56, 0.30),
-                blend(agedStats.minutesPlayed(), modelStats.minutesPlayed(), positionAverage.minutesPlayed(), 0.58, 0.28),
-                blend(agedStats.points(), modelStats.points(), positionAverage.points(), 0.58, 0.30),
-                blend(agedStats.totalRebounds(), modelStats.totalRebounds(), positionAverage.totalRebounds(), 0.58, 0.30),
-                blend(agedStats.assists(), modelStats.assists(), positionAverage.assists(), 0.58, 0.30),
-                blend(agedStats.steals(), modelStats.steals(), positionAverage.steals(), 0.56, 0.30),
-                blend(agedStats.blocks(), modelStats.blocks(), positionAverage.blocks(), 0.56, 0.30),
-                blend(agedStats.turnovers(), modelStats.turnovers(), positionAverage.turnovers(), 0.58, 0.30),
-                blend(agedStats.fieldGoalPct(), modelStats.fieldGoalPct(), positionAverage.fieldGoalPct(), 0.62, 0.24),
-                blend(agedStats.threePointerPct(), modelStats.threePointerPct(), positionAverage.threePointerPct(), 0.62, 0.24),
-                blend(agedStats.freeThrowPct(), modelStats.freeThrowPct(), positionAverage.freeThrowPct(), 0.66, 0.20),
-                blend(agedStats.effectiveFieldGoalPct(), modelStats.effectiveFieldGoalPct(), positionAverage.effectiveFieldGoalPct(), 0.62, 0.24));
-    }
-
-    private double blend(double aged, double model, double baseline, double agedWeight, double modelWeight) {
-        double baselineWeight = 1.0 - agedWeight - modelWeight;
-        return (aged * agedWeight) + (model * modelWeight) + (baseline * baselineWeight);
     }
 
     private PredictionStats boundPrediction(PredictionStats stats, Player player) {
@@ -308,16 +288,13 @@ public class PlayerPredictionService {
                 round(predicted.effectiveFieldGoalPct() - current.effectiveFieldGoalPct(), 3));
     }
 
-    private double[] buildFeatures(Player player, boolean nextSeason, double teamIndex) {
-        double age = player.getAge() + (nextSeason ? 1.0 : 0.0);
-        double startsRate = player.getGames() > 0 ? (double) player.getGamesStarted() / player.getGames() : 0.0;
-        String position = safePosition(player);
+    private double[] buildFeatures(Player player, double teamIndex) {
+        double age = player.getAge() + 1.0;
 
         return new double[] {
                 age / 40.0,
                 (age * age) / 1600.0,
                 player.getGames() / 82.0,
-                startsRate,
                 player.getMinutesPlayed() / 48.0,
                 player.getPoints() / 40.0,
                 player.getTotalRebounds() / 18.0,
@@ -329,10 +306,7 @@ public class PlayerPredictionService {
                 player.getThreePointerPct(),
                 player.getFreeThrowPct(),
                 player.getEffectiveFieldGoalPct(),
-                teamIndex,
-                isGuard(position) ? 1.0 : 0.0,
-                isWing(position) ? 1.0 : 0.0,
-                isBig(position) ? 1.0 : 0.0
+                teamIndex
         };
     }
 
@@ -352,42 +326,6 @@ public class PlayerPredictionService {
                 player.getEffectiveFieldGoalPct());
     }
 
-    private double ageCurve(int nextAge) {
-        if (nextAge <= 22) {
-            return 1.06;
-        }
-        if (nextAge <= 25) {
-            return 1.035;
-        }
-        if (nextAge <= 29) {
-            return 1.01;
-        }
-        if (nextAge <= 32) {
-            return 0.985;
-        }
-        if (nextAge <= 35) {
-            return 0.94;
-        }
-        return 0.90;
-    }
-
-    private double availabilityAgeAdjustment(int currentAge) {
-        if (currentAge <= 25) {
-            return 0.015;
-        }
-        if (currentAge >= 34) {
-            return -0.06;
-        }
-        if (currentAge >= 31) {
-            return -0.03;
-        }
-        return 0.0;
-    }
-
-    private double guardCreationBonus(Player player) {
-        return isGuard(safePosition(player)) ? 0.015 : -0.005;
-    }
-
     private double roleStability(Player player) {
         double availability = clamp(player.getGames() / 82.0, 0, 1);
         double startsRate = player.getGames() > 0 ? (double) player.getGamesStarted() / player.getGames() : 0.0;
@@ -405,28 +343,18 @@ public class PlayerPredictionService {
         return clamp(0.30 + availability * 0.20 + role * 0.18 + ageReliability * 0.12 + sampleReliability * 0.10 + validationReliability * 0.14, 0.30, 0.94);
     }
 
-    private boolean isGuard(String position) {
-        return position.contains("PG") || position.contains("SG");
-    }
-
-    private boolean isWing(String position) {
-        return position.contains("SG") || position.contains("SF") || position.contains("PF");
-    }
-
-    private boolean isBig(String position) {
-        return position.contains("PF") || position.contains("C");
-    }
-
-    private String safePosition(Player player) {
-        return player.getPosition() == null || player.getPosition().isBlank()
-                ? "UNK"
-                : player.getPosition().trim().toUpperCase(Locale.ROOT);
-    }
-
     private String safeTeam(Player player) {
-        return player.getTeam() == null || player.getTeam().isBlank()
-                ? "UNK"
-                : player.getTeam().trim().toUpperCase(Locale.ROOT);
+        if (player.getTeam() == null || player.getTeam().isBlank()) {
+            return "UNK";
+        }
+
+        String team = player.getTeam().trim().toUpperCase(Locale.ROOT);
+        return switch (team) {
+            case "BKN" -> "BRK";
+            case "CHA" -> "CHO";
+            case "PHX" -> "PHO";
+            default -> team;
+        };
     }
 
     private String normalize(String value) {
@@ -446,6 +374,8 @@ public class PlayerPredictionService {
     private record PythonModelArtifact(
             String modelName,
             int trainingSamples,
+            int historicalRows,
+            List<String> trainingSeasons,
             List<String> featureNames,
             List<String> targetStats,
             Instant trainedAt,
@@ -455,13 +385,20 @@ public class PlayerPredictionService {
             double[][] coefficients,
             double[] intercepts,
             Map<String, Double> teamScoringIndexes,
-            Map<String, Map<String, Double>> positionAverages,
-            Map<String, Double> leagueAverage,
             Metrics metrics) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    private record Metrics(Double r2, Map<String, Double> mae) {
+    private record Metrics(
+            Double r2,
+            Map<String, Double> mae,
+            Double withinToleranceAccuracyPct,
+            Map<String, Double> withinToleranceAccuracyByStat,
+            Map<String, Double> toleranceByStat,
+            Double baselineWithinToleranceAccuracyPct,
+            Double accuracyImprovementPctPoints,
+            String validationSeason,
+            int validationSamples) {
     }
 
     private record PythonPredictionModel(
@@ -470,51 +407,49 @@ public class PlayerPredictionService {
             double[][] coefficients,
             double[] intercepts,
             Map<String, Double> teamScoringIndexes,
-            Map<String, PredictionStats> positionAverages,
-            PredictionStats leagueAverage,
             Double validationR2,
             ModelSummary summary) {
 
         static PythonPredictionModel fromArtifact(PythonModelArtifact artifact) {
+            if (!FEATURE_NAMES.equals(artifact.featureNames())) {
+                throw new IllegalStateException("Python model feature order does not match Java inference features.");
+            }
+            if (!TARGET_STATS.equals(artifact.targetStats())) {
+                throw new IllegalStateException("Python model targets do not match Java prediction targets.");
+            }
+
+            Metrics metrics = artifact.metrics();
             ModelSummary summary = new ModelSummary(
                     artifact.modelName(),
                     artifact.trainingSamples(),
+                    artifact.historicalRows(),
+                    artifact.trainingSeasons(),
+                    metrics == null ? null : metrics.validationSeason(),
+                    metrics == null ? 0 : metrics.validationSamples(),
                     artifact.featureNames().size(),
                     artifact.targetStats(),
+                    metrics == null ? null : metrics.r2(),
+                    metrics == null ? null : metrics.withinToleranceAccuracyPct(),
+                    metrics == null || metrics.withinToleranceAccuracyByStat() == null
+                            ? Map.of()
+                            : metrics.withinToleranceAccuracyByStat(),
+                    metrics == null || metrics.toleranceByStat() == null
+                            ? Map.of()
+                            : metrics.toleranceByStat(),
+                    metrics == null ? null : metrics.baselineWithinToleranceAccuracyPct(),
+                    metrics == null ? null : metrics.accuracyImprovementPctPoints(),
+                    metrics == null || metrics.mae() == null ? Map.of() : metrics.mae(),
                     artifact.trainedAt(),
                     artifact.trainingNote());
-
-            Map<String, PredictionStats> positionAverages = artifact.positionAverages()
-                    .entrySet()
-                    .stream()
-                    .collect(Collectors.toMap(Map.Entry::getKey, entry -> statsFromMap(entry.getValue())));
 
             return new PythonPredictionModel(
                     artifact.scalerMean(),
                     artifact.scalerScale(),
                     artifact.coefficients(),
                     artifact.intercepts(),
-                    artifact.teamScoringIndexes(),
-                    positionAverages,
-                    statsFromMap(artifact.leagueAverage()),
-                    artifact.metrics() == null ? null : artifact.metrics().r2(),
+                    artifact.teamScoringIndexes() == null ? Map.of() : artifact.teamScoringIndexes(),
+                    metrics == null ? null : metrics.r2(),
                     summary);
-        }
-
-        private static PredictionStats statsFromMap(Map<String, Double> values) {
-            return new PredictionStats(
-                    values.getOrDefault("games", 0.0),
-                    values.getOrDefault("minutesPlayed", 0.0),
-                    values.getOrDefault("points", 0.0),
-                    values.getOrDefault("totalRebounds", 0.0),
-                    values.getOrDefault("assists", 0.0),
-                    values.getOrDefault("steals", 0.0),
-                    values.getOrDefault("blocks", 0.0),
-                    values.getOrDefault("turnovers", 0.0),
-                    values.getOrDefault("fieldGoalPct", 0.0),
-                    values.getOrDefault("threePointerPct", 0.0),
-                    values.getOrDefault("freeThrowPct", 0.0),
-                    values.getOrDefault("effectiveFieldGoalPct", 0.0));
         }
     }
 }

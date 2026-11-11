@@ -543,7 +543,9 @@ function renderModelSummary() {
     hour: "numeric",
     minute: "2-digit",
   });
-  els.modelStatus.textContent = `${state.modelSummary.modelName} · ${state.modelSummary.trainingSamples} samples · ${state.modelSummary.targetStats.length} targets · trained ${trainedAt}`;
+  const accuracy = Number(state.modelSummary.withinToleranceAccuracyPct || 0).toFixed(1);
+  const seasonCount = state.modelSummary.trainingSeasons?.length || 0;
+  els.modelStatus.textContent = `${state.modelSummary.modelName} · ${accuracy}% tolerance accuracy on ${state.modelSummary.validationSeason} · ${state.modelSummary.validationSamples} test players · ${state.modelSummary.trainingSamples} transitions across ${seasonCount} seasons · trained ${trainedAt}`;
 }
 
 function renderTopPredictions() {
